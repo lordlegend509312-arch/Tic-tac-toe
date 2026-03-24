@@ -743,23 +743,38 @@ const db   = getDatabase(app);
 const auth = getAuth(app);
 
 // ── Anonymous Auth ─────────────────────────────────────────
-// Silently sign in — user sees nothing, but auth != null in rules
 let authReady = false;
 let authUser  = null;
 
-signInAnonymously(auth).catch(e => console.warn('Auth failed:', e));
-
-onAuthStateChanged(auth, user => {
-  authUser  = user;
-  authReady = !!user;
-  if (authReady) {
-    // Hide connecting overlay once auth is ready
+// Timeout fallback — agar 5 sec mein auth na ho toh bhi game chalao
+const authTimeout = setTimeout(() => {
+  if (!authReady) {
+    console.warn('Auth timeout — proceeding without auth');
+    authReady = true;
+    authUser  = null;
     document.getElementById('connectingOverlay').classList.add('hidden');
     document.getElementById('screen-home').classList.remove('hidden');
   }
+}, 5000);
+
+onAuthStateChanged(auth, user => {
+  authUser  = user;
+  authReady = true;
+  clearTimeout(authTimeout);
+  document.getElementById('connectingOverlay').classList.add('hidden');
+  document.getElementById('screen-home').classList.remove('hidden');
 });
 
-// Show connecting while auth loads
+signInAnonymously(auth).catch(e => {
+  console.warn('Auth failed:', e);
+  // Auth fail hone pe bhi game chalao — just without auth rules
+  clearTimeout(authTimeout);
+  authReady = true;
+  document.getElementById('connectingOverlay').classList.add('hidden');
+  document.getElementById('screen-home').classList.remove('hidden');
+});
+
+// Show connecting overlay while auth loads
 document.getElementById('connectingOverlay').classList.remove('hidden');
 document.getElementById('screen-home').classList.add('hidden');
 document.getElementById('connText').textContent = 'Connecting...';
