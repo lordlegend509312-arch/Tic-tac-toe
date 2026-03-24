@@ -725,6 +725,8 @@ body::before{
 import { initializeApp }     from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getDatabase, ref, set, get, onValue, update, remove, off, onDisconnect, push }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import { getAuth, signInAnonymously, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 // ── Firebase Config ────────────────────────────────────────
 const firebaseConfig = {
@@ -736,13 +738,96 @@ const firebaseConfig = {
   messagingSenderId: "323961312756",
   appId: "1:323961312756:web:8f845646bcaa53ff1195a1"
 };
-const app = initializeApp(firebaseConfig);
-const db  = getDatabase(app);
+const app  = initializeApp(firebaseConfig);
+const db   = getDatabase(app);
+const auth = getAuth(app);
+
+// ── Anonymous Auth ─────────────────────────────────────────
+// Silently sign in — user sees nothing, but auth != null in rules
+let authReady = false;
+let authUser  = null;
+
+signInAnonymously(auth).catch(e => console.warn('Auth failed:', e));
+
+onAuthStateChanged(auth, user => {
+  authUser  = user;
+  authReady = !!user;
+  if (authReady) {
+    // Hide connecting overlay once auth is ready
+    document.getElementById('connectingOverlay').classList.add('hidden');
+    document.getElementById('screen-home').classList.remove('hidden');
+  }
+});
+
+// Show connecting while auth loads
+document.getElementById('connectingOverlay').classList.remove('hidden');
+document.getElementById('screen-home').classList.add('hidden');
+document.getElementById('connText').textContent = 'Connecting...';
 
 // ── Constants ──────────────────────────────────────────────
 const WINS        = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
 const TURN_LIMIT  = 120;
 const REMATCH_LIMIT = 60;
+
+// ── Security Constants ─────────────────────────────────────
+const MAX_MSG_LEN   = 1000;   // chat message max length
+const CHAT_COOLDOWN = 500;    // ms between messages
+const NAME_MAX_LEN  = 16;     // player name max length
+
+// ── Input Sanitizer (XSS prevention) ──────────────────────
+function sanitize(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/[<>&"'`]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]))
+    .trim()
+    .slice(0, MAX_MSG_LEN);
+}
+function sanitizeName(str) {
+  if (typeof str !== 'string') return 'Player';
+  return str.replace(/[<>&"'`]/g, '').trim().slice(0, NAME_MAX_LEN) || 'Player';
+}
+
+// ── AES-GCM Chat Encryption ────────────────────────────────
+// Room code used to derive key — only room members can decrypt
+async function deriveKey(roomCode) {
+  const enc = new TextEncoder();
+  const km  = await crypto.subtle.importKey(
+    'raw', enc.encode(roomCode + '_ttt_v1'),
+    { name:'PBKDF2' }, false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name:'PBKDF2', salt:enc.encode('anushka_ttt_salt'), iterations:10000, hash:'SHA-256' },
+    km, { name:'AES-GCM', length:256 }, false, ['encrypt','decrypt']
+  );
+}
+async function encryptMsg(plaintext, roomCode) {
+  try {
+    const key = await deriveKey(roomCode);
+    const iv  = crypto.getRandomValues(new Uint8Array(12));
+    const enc = new TextEncoder();
+    const ct  = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, enc.encode(plaintext));
+    const combined = new Uint8Array(iv.byteLength + ct.byteLength);
+    combined.set(iv, 0); combined.set(new Uint8Array(ct), iv.byteLength);
+    return btoa(String.fromCharCode(...combined));
+  } catch(e) { return plaintext; }
+}
+async function decryptMsg(ciphertext, roomCode) {
+  try {
+    const key  = await deriveKey(roomCode);
+    const data = Uint8Array.from(atob(ciphertext), c => c.charCodeAt(0));
+    const dec  = await crypto.subtle.decrypt({ name:'AES-GCM', iv:data.slice(0,12) }, key, data.slice(12));
+    return new TextDecoder().decode(dec);
+  } catch(e) { return ciphertext; }
+}
+
+// ── Validate incoming chat message ────────────────────────
+function isValidChatMsg(m) {
+  if (!m || typeof m !== 'object') return false;
+  if (!m.text || typeof m.text !== 'string') return false;
+  if (!m.sender || (m.sender !== 'X' && m.sender !== 'O')) return false;
+  if (typeof m.ts !== 'number' || m.ts > Date.now() + 10000) return false;
+  return true;
+}
 
 // ── State ──────────────────────────────────────────────────
 let roomId       = null;
@@ -805,7 +890,7 @@ function showScreen(id, cb) {
 }
 
 function getName() {
-  const n = document.getElementById('playerName').value.trim();
+  const n = sanitizeName(document.getElementById('playerName').value);
   return n || 'Player ' + Math.floor(Math.random() * 900 + 100);
 }
 
@@ -875,6 +960,7 @@ window.startAI = function() {
 
 // ── CREATE ROOM ────────────────────────────────────────────
 async function createRoom() {
+  if (!authReady) { showToast('⏳ Still connecting, try again...'); return; }
   myRole = 'X';
   const connOverlay = document.getElementById('connectingOverlay');
   document.getElementById('connText').textContent = 'Creating room...';
@@ -934,6 +1020,7 @@ window.cancelRoom = async function() {
 
 // ── JOIN ROOM ──────────────────────────────────────────────
 window.joinRoom = async function() {
+  if (!authReady) { showToast('⏳ Still connecting, try again...'); return; }
   myName = getName();
   const joinBtn = document.querySelector('#joinDialog .btn.primary');
   if (joinBtn) joinBtn.disabled = true;
@@ -1371,17 +1458,30 @@ window.leaveGame = async function() {
 // ── CHAT ──────────────────────────────────────────────────
 let lastChatSent = 0;
 window.sendChat = async function() {
-  if (!roomId || !myRole) return;
+  if (!roomId || !myRole || !authReady) return;
   const inp = document.getElementById('chatInput');
-  const txt = inp.value.trim(); if (!txt) return;
+  const raw = inp.value.trim(); if (!raw) return;
+
+  // Rate limit
   const now = Date.now();
-  if (now - lastChatSent < 800) { showToast('⏳ Too fast!', 1500); return; }
+  if (now - lastChatSent < CHAT_COOLDOWN) { showToast('⏳ Too fast!', 1500); return; }
   lastChatSent = now;
+
+  // Sanitize
+  const txt = sanitize(raw); if (!txt) return;
+
   clearTimeout(typingTimeout);
   if (roomId && myRole) update(ref(db, `rooms/${roomId}/typing`), { [myRole]: false }).catch(()=>{});
   inp.value = '';
-  const msgData = { sender:myRole, name:myName, text:txt, ts:Date.now() };
-  if (replyTo) { msgData.replyText = replyTo.text; msgData.replySender = replyTo.sender; }
+
+  // Encrypt before storing in Firebase
+  const encText  = await encryptMsg(txt, roomId);
+  const msgData  = { sender:myRole, name:sanitizeName(myName), text:encText, ts:Date.now(), encrypted:true };
+  if (replyTo) {
+    msgData.replyText    = await encryptMsg(sanitize(replyTo.text), roomId);
+    msgData.replySender  = replyTo.sender;
+    msgData.replyEncrypted = true;
+  }
   cancelReply();
   await push(ref(db, `rooms/${roomId}/chat`), msgData);
 };
@@ -1404,41 +1504,55 @@ function setReply(text, sender) {
 }
 
 window.sendReaction = async function(emoji) {
-  if (!roomId || !myRole) return;
-  await push(ref(db, `rooms/${roomId}/chat`), { sender:myRole, name:myName, text:emoji, ts:Date.now(), reaction:true });
+  if (!roomId || !myRole || !authReady) return;
+  const now = Date.now();
+  if (now - lastChatSent < 600) return;
+  lastChatSent = now;
+  const encEmoji = await encryptMsg(emoji, roomId);
+  await push(ref(db, `rooms/${roomId}/chat`), {
+    sender:myRole, name:sanitizeName(myName),
+    text:encEmoji, ts:Date.now(), reaction:true, encrypted:true
+  });
   playSound('react');
 };
 
 function renderChat(chatData) {
   const container = document.getElementById('chatMessages');
-  const msgs = Object.values(chatData).sort((a,b) => a.ts - b.ts);
+  const allMsgs   = Object.values(chatData).sort((a,b) => a.ts - b.ts);
+  const msgs      = allMsgs.filter(isValidChatMsg); // validate each message
   if (msgs.length === lastChatCount) return;
   const newMsgs = msgs.slice(lastChatCount);
-  newMsgs.forEach(m => {
+
+  newMsgs.forEach(async m => {
     const isMe = m.sender === myRole;
-    const div = document.createElement('div');
+    const div  = document.createElement('div');
     div.className = 'chat-msg ' + (isMe?'mine':'theirs');
 
-    // Sender name (for opponent msgs)
+    // Sender name — always textContent, never innerHTML
     if (!isMe) {
       const s = document.createElement('div');
-      s.className='chat-sender'; s.textContent = m.name || (m.sender==='X'?'Player 1':'Player 2');
+      s.className  = 'chat-sender';
+      s.textContent = sanitizeName(m.name || (m.sender==='X'?'Player 1':'Player 2'));
       div.appendChild(s);
     }
 
-    // Reply quote bar
+    // Reply bar — decrypt if encrypted
     if (m.replyText) {
-      const rb = document.createElement('div');
+      const rb  = document.createElement('div');
       rb.className = 'chat-reply-bar';
-      rb.textContent = '↩ ' + m.replyText;
+      const rTxt = m.replyEncrypted ? await decryptMsg(m.replyText, roomId) : m.replyText;
+      rb.textContent = '↩ ' + sanitize(rTxt).slice(0, 80);
       div.appendChild(rb);
     }
 
-    const bubble = document.createElement('div');
-    bubble.className = 'chat-bubble'; bubble.textContent = m.text;
+    // Message bubble — decrypt then sanitize
+    const bubble  = document.createElement('div');
+    bubble.className = 'chat-bubble';
+    const rawText = m.encrypted ? await decryptMsg(m.text, roomId) : m.text;
+    bubble.textContent = sanitize(rawText); // textContent = XSS safe
     div.appendChild(bubble);
 
-    // Swipe-to-reply (touch)
+    // Swipe-to-reply
     let touchStartX = 0, touchStartY = 0, swiping = false;
     div.addEventListener('touchstart', e => {
       touchStartX = e.touches[0].clientX;
@@ -1448,26 +1562,24 @@ function renderChat(chatData) {
     div.addEventListener('touchmove', e => {
       const dx = e.touches[0].clientX - touchStartX;
       const dy = Math.abs(e.touches[0].clientY - touchStartY);
-      if (dy > 12) return; // vertical scroll, ignore
+      if (dy > 12) return;
       if (dx > 8 && !swiping) { swiping = true; }
-      if (swiping && dx > 0 && dx < 80) {
-        div.style.transform = `translateX(${dx * 0.5}px)`;
-      }
+      if (swiping && dx > 0 && dx < 80) div.style.transform = `translateX(${dx*0.5}px)`;
     }, {passive:true});
     div.addEventListener('touchend', e => {
       const dx = e.changedTouches[0].clientX - touchStartX;
       div.style.transform = '';
       if (swiping && dx > 40) {
-        setReply(m.text, m.sender);
-        // small vibrate feedback
+        setReply(bubble.textContent, m.sender);
         try { if(navigator.vibrate) navigator.vibrate(30); } catch(e){}
       }
       swiping = false;
     }, {passive:true});
 
     container.appendChild(div);
-    while (container.children.length > 100) container.removeChild(container.firstChild);
+    container.scrollTop = container.scrollHeight;
   });
+
   if (newMsgs.length > 0 && lastChatCount > 0) {
     const latest = newMsgs[newMsgs.length-1];
     if (latest.sender !== myRole) playSound('chat');
