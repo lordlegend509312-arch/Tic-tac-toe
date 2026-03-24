@@ -1019,8 +1019,13 @@ function handleRoomUpdate(data) {
 
 // ── RENDER GAME ────────────────────────────────────────────
 function renderGame(data) {
-  const { players, board, current, status, scores, newGameRequest, presence, winner, typing } = data;
+  const { players, current, status, scores, newGameRequest, presence, winner, typing } = data;
   if (!players.O) return; // Still waiting — shouldn't reach here but guard anyway
+  // Firebase strips null values from arrays — normalize board back to proper array
+  const rawBoard = data.board;
+  const board = Array.from({length:9}, (_, idx) =>
+    (Array.isArray(rawBoard) ? rawBoard[idx] : rawBoard?.[idx]) || null
+  );
 
   // Opponent presence
   const oppRole = myRole === 'X' ? 'O' : 'X';
@@ -1187,27 +1192,41 @@ function stopRematchTimer() {
 
 // ── CELL CLICK (Online) ────────────────────────────────────
 async function handleCellClick(i) {
+  if (!isOnlineGame) return;
   if (!roomId || processing) return;
   processing = true;
   try {
     const snap = await get(ref(db, `rooms/${roomId}`));
-    if (!snap.exists()) return;
+    if (!snap.exists()) { processing = false; return; }
     const data = snap.val();
-    if (data.status!=='playing' || data.current!==myRole || data.board[i]) return;
-    const nb = [...data.board]; nb[i] = myRole;
+
+    // Firebase may strip null values from arrays, converting to object — normalize it
+    const rawBoard = data.board;
+    const board = Array.from({length:9}, (_, idx) =>
+      (Array.isArray(rawBoard) ? rawBoard[idx] : rawBoard?.[idx]) || null
+    );
+
+    if (data.status !== 'playing' || data.current !== myRole || board[i]) {
+      processing = false; return;
+    }
+
+    const nb = [...board]; nb[i] = myRole;
     playSound('place');
-    const win = checkWin(nb); const isDraw = !win && nb.every(c => c);
+    const win = checkWin(nb);
+    const isDraw = !win && nb.every(c => c);
     const upd = { board: nb };
     if (win) {
-      const ns = {...data.scores}; ns[myRole] = (ns[myRole]||0)+1;
+      const ns = {...(data.scores||{X:0,O:0,D:0})}; ns[myRole] = (ns[myRole]||0)+1;
       upd.status='won'; upd.winner=myRole; upd.scores=ns; upd.turnStart=null; upd.gameOverAt=Date.now();
     } else if (isDraw) {
-      const ns = {...data.scores}; ns.D = (ns.D||0)+1;
+      const ns = {...(data.scores||{X:0,O:0,D:0})}; ns.D = (ns.D||0)+1;
       upd.status='draw'; upd.scores=ns; upd.turnStart=null; upd.gameOverAt=Date.now();
     } else {
       upd.current = myRole==='X'?'O':'X'; upd.turnStart = Date.now();
     }
     await update(ref(db, `rooms/${roomId}`), upd);
+  } catch(e) {
+    console.error('Cell click error:', e);
   } finally { processing = false; }
 }
 
@@ -1627,4 +1646,4 @@ window.sendReaction = window.sendReaction;
 </body>
   </html>
 
-  
+                                         
