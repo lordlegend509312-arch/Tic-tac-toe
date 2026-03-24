@@ -394,6 +394,44 @@ body::before{
 #screen-home.fading,#screen-lobby.fading,#screen-game.fading,#screen-ai.fading{opacity:0;pointer-events:none;}
 @keyframes shake{0%,100%{transform:translateX(0);}25%{transform:translateX(-5px);}75%{transform:translateX(5px);}}
 .inp.shake{animation:shake 0.3s ease;}
+
+/* ── ACTIVE TURN GLOW ── */
+@keyframes glowPulseX{0%,100%{box-shadow:0 0 0 2px rgba(232,255,107,0.15);}50%{box-shadow:0 0 18px 4px rgba(232,255,107,0.45),0 0 0 2px rgba(232,255,107,0.5);}}
+@keyframes glowPulseO{0%,100%{box-shadow:0 0 0 2px rgba(107,255,212,0.15);}50%{box-shadow:0 0 18px 4px rgba(107,255,212,0.45),0 0 0 2px rgba(107,255,212,0.5);}}
+.score-card.glow-x{animation:glowPulseX 1.4s ease-in-out infinite;}
+.score-card.glow-o{animation:glowPulseO 1.4s ease-in-out infinite;}
+
+/* ── NUDGE BUTTON ── */
+.nudge-btn{
+  background:rgba(255,170,0,0.08);border:1px solid rgba(255,170,0,0.3);
+  border-radius:8px;padding:5px 12px;font-size:11px;font-weight:700;
+  font-family:'Space Mono',monospace;color:#ffaa33;cursor:pointer;
+  transition:all 0.15s;white-space:nowrap;
+}
+.nudge-btn:hover{background:rgba(255,170,0,0.18);border-color:#ffaa33;}
+.nudge-btn:active{transform:scale(0.95);}
+.nudge-btn:disabled{opacity:0.35;cursor:not-allowed;}
+
+/* ── CHAT REPLY PREVIEW ── */
+.reply-preview{
+  display:none;align-items:center;gap:8px;
+  padding:6px 12px;background:rgba(232,255,107,0.05);
+  border-top:1px solid var(--border);border-left:3px solid var(--accent);
+}
+.reply-preview.show{display:flex;}
+.reply-preview-text{flex:1;font-size:11px;color:var(--muted2);font-family:'Space Mono',monospace;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.reply-cancel{background:none;border:none;cursor:pointer;color:var(--muted2);font-size:14px;padding:0 2px;}
+.chat-reply-bar{
+  display:block;font-size:10px;color:var(--muted2);font-family:'Space Mono',monospace;
+  padding:2px 8px;background:rgba(255,255,255,0.04);border-radius:6px;
+  margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;
+  border-left:2px solid var(--accent2);
+}
+.chat-msg.mine .chat-reply-bar{border-left-color:var(--accent);align-self:flex-end;}
+
+/* ── SWIPE HINT ── */
+.chat-msg{touch-action:pan-y;user-select:none;transition:transform 0.15s ease;}
 </style>
 </head>
 <body>
@@ -500,20 +538,22 @@ body::before{
     </div>
   </div>
 
-  <div class="scoreboard">
-    <div class="score-card" id="cardX">
-      <div class="score-label x">X</div>
-      <div class="score-name" id="nameXDisplay">-</div>
-      <div class="score-num" id="scoreX">0</div>
+  <!-- Scoreboard: myCard always left, oppCard always right -->
+  <div class="scoreboard" id="scoreboard">
+    <div class="score-card" id="myScoreCard">
+      <div class="score-label" id="myScoreLabel">X</div>
+      <div class="score-name" id="myNameDisplay">-</div>
+      <div class="score-num" id="myScoreNum">0</div>
+      <div class="you-badge" id="myYouBadge">YOU</div>
     </div>
     <div class="score-divider">
       <div class="draw-num" id="scoreDraw">0</div>
       <span>Draw</span>
     </div>
-    <div class="score-card" id="cardO">
-      <div class="score-label o">O</div>
-      <div class="score-name" id="nameODisplay">-</div>
-      <div class="score-num" id="scoreO">0</div>
+    <div class="score-card" id="oppScoreCard">
+      <div class="score-label" id="oppScoreLabel">O</div>
+      <div class="score-name" id="oppNameDisplay">-</div>
+      <div class="score-num" id="oppScoreNum">0</div>
     </div>
   </div>
 
@@ -542,6 +582,7 @@ body::before{
   <div class="actions">
     <button class="btn danger" onclick="leaveGame()">← Leave</button>
     <button class="btn ghost" onclick="copyRoomCode()" id="copyCodeBtn">Copy Code</button>
+    <button class="nudge-btn hidden" id="nudgeBtn" onclick="nudgeOpponent()">📳 Nudge</button>
     <button class="btn primary hidden" onclick="requestNewGame()" id="newGameBtn">Play Again</button>
   </div>
 
@@ -561,6 +602,11 @@ body::before{
       <button class="react-btn" onclick="sendReaction('💀')">💀</button>
       <button class="react-btn" onclick="sendReaction('😎')">😎</button>
       <button class="react-btn" onclick="sendReaction('🤣')">🤣</button>
+    </div>
+    <div class="reply-preview" id="replyPreview">
+      <span style="font-size:10px;color:var(--muted2);font-family:'Space Mono',monospace;margin-right:2px;">↩</span>
+      <span class="reply-preview-text" id="replyPreviewText"></span>
+      <button class="reply-cancel" onclick="cancelReply()" title="Cancel reply">✕</button>
     </div>
     <div class="chat-input-row">
       <input class="chat-inp" id="chatInput" maxlength="120" placeholder="Message...">
@@ -713,8 +759,11 @@ let turnTimerInterval = null;
 let rematchInterval   = null;
 let lastChatCount     = 0;
 let typingTimeout     = null;
-let isOnlineGame      = false; // track if online or local
+let isOnlineGame      = false;
 let muted             = false;
+let replyTo           = null;   // {text, sender} for chat reply
+let nudgeCooldown     = false;  // prevent spam nudge
+let lastNudgeReceived = 0;      // track received nudge ts
 
 // ── DOM ────────────────────────────────────────────────────
 const cells   = document.querySelectorAll('#board .cell');
@@ -1020,15 +1069,17 @@ function handleRoomUpdate(data) {
 // ── RENDER GAME ────────────────────────────────────────────
 function renderGame(data) {
   const { players, current, status, scores, newGameRequest, presence, winner, typing } = data;
-  if (!players.O) return; // Still waiting — shouldn't reach here but guard anyway
-  // Firebase strips null values from arrays — normalize board back to proper array
+  if (!players.O) return; // Still waiting
+
+  // Normalize board (Firebase strips nulls from arrays)
   const rawBoard = data.board;
-  const board = Array.from({length:9}, (_, idx) =>
+  const board = Array.from({length:9}, (_,idx) =>
     (Array.isArray(rawBoard) ? rawBoard[idx] : rawBoard?.[idx]) || null
   );
 
-  // Opponent presence
   const oppRole = myRole === 'X' ? 'O' : 'X';
+
+  // Opponent presence
   const oppOnline = !!presence?.[oppRole];
   const dot = document.getElementById('oppDot');
   dot.className = 'online-dot' + (oppOnline ? '' : ' offline');
@@ -1042,28 +1093,50 @@ function renderGame(data) {
   document.getElementById('typingName').textContent = players[oppRole] || 'Opponent';
   if (oppTyping) typingEl.classList.add('show'); else typingEl.classList.remove('show');
 
-  // Names
-  document.getElementById('nameXDisplay').textContent = players.X || 'Player 1';
-  document.getElementById('nameODisplay').textContent = players.O || 'Player 2';
   document.getElementById('roomTag').textContent = `#${roomId}`;
 
-  // Scores
-  document.getElementById('scoreX').textContent    = scores?.X || 0;
-  document.getElementById('scoreO').textContent    = scores?.O || 0;
-  document.getElementById('scoreDraw').textContent = scores?.D || 0;
+  // ── SCOREBOARD: myCard always LEFT, oppCard always RIGHT ──
+  const myCard  = document.getElementById('myScoreCard');
+  const oppCard = document.getElementById('oppScoreCard');
+  const myLbl   = document.getElementById('myScoreLabel');
+  const oppLbl  = document.getElementById('oppScoreLabel');
+  const myBadge = document.getElementById('myYouBadge');
 
-  // Score cards
-  ['cardX','cardO'].forEach(id => {
-    const card = document.getElementById(id);
-    const role = id === 'cardX' ? 'X' : 'O';
-    card.querySelector('.you-badge')?.remove();
-    card.className = 'score-card' + (current===role ? (role==='X'?' active-x':' active-o') : '');
-    if (role === myRole) {
-      const b = document.createElement('div');
-      b.className = 'you-badge' + (role==='O'?' o':'');
-      b.textContent = 'YOU'; card.appendChild(b);
+  myLbl.textContent  = myRole;
+  myLbl.className    = 'score-label ' + myRole.toLowerCase();
+  oppLbl.textContent = oppRole;
+  oppLbl.className   = 'score-label ' + oppRole.toLowerCase();
+  myBadge.className  = 'you-badge' + (myRole==='O'?' o':'');
+
+  document.getElementById('myNameDisplay').textContent  = players[myRole]  || 'You';
+  document.getElementById('oppNameDisplay').textContent = players[oppRole] || 'Opponent';
+  document.getElementById('myScoreNum').textContent  = scores?.[myRole]  || 0;
+  document.getElementById('oppScoreNum').textContent = scores?.[oppRole] || 0;
+  document.getElementById('scoreDraw').textContent   = scores?.D || 0;
+
+  // Glow on active player's card
+  const myTurnNow  = current === myRole  && status === 'playing';
+  const oppTurnNow = current === oppRole && status === 'playing';
+  myCard.className  = 'score-card' + (myTurnNow  ? (myRole==='X'?' active-x glow-x':' active-o glow-o')  : '');
+  oppCard.className = 'score-card' + (oppTurnNow ? (oppRole==='X'?' active-x glow-x':' active-o glow-o') : '');
+
+  // Nudge button: show only when it's opponent's turn and game is playing
+  const nudgeBtn = document.getElementById('nudgeBtn');
+  if (nudgeBtn) {
+    if (!oppTurnNow || status !== 'playing') {
+      nudgeBtn.classList.add('hidden');
+    } else {
+      nudgeBtn.classList.remove('hidden');
+      nudgeBtn.disabled = nudgeCooldown;
     }
-  });
+  }
+
+  // Handle incoming nudge
+  if (data.nudge && data.nudge.target === myRole && data.nudge.ts > lastNudgeReceived) {
+    lastNudgeReceived = data.nudge.ts;
+    doVibrate();
+    showToast('📳 ' + (players[oppRole]||'Opponent') + ' is nudging you! Your turn!', 3000);
+  }
 
   // Board — only re-render if changed
   const boardKey = board.join(',');
@@ -1199,21 +1272,14 @@ async function handleCellClick(i) {
     const snap = await get(ref(db, `rooms/${roomId}`));
     if (!snap.exists()) { processing = false; return; }
     const data = snap.val();
-
-    // Firebase may strip null values from arrays, converting to object — normalize it
     const rawBoard = data.board;
-    const board = Array.from({length:9}, (_, idx) =>
+    const board = Array.from({length:9}, (_,idx) =>
       (Array.isArray(rawBoard) ? rawBoard[idx] : rawBoard?.[idx]) || null
     );
-
-    if (data.status !== 'playing' || data.current !== myRole || board[i]) {
-      processing = false; return;
-    }
-
+    if (data.status !== 'playing' || data.current !== myRole || board[i]) { processing = false; return; }
     const nb = [...board]; nb[i] = myRole;
     playSound('place');
-    const win = checkWin(nb);
-    const isDraw = !win && nb.every(c => c);
+    const win = checkWin(nb); const isDraw = !win && nb.every(c => c);
     const upd = { board: nb };
     if (win) {
       const ns = {...(data.scores||{X:0,O:0,D:0})}; ns[myRole] = (ns[myRole]||0)+1;
@@ -1225,9 +1291,31 @@ async function handleCellClick(i) {
       upd.current = myRole==='X'?'O':'X'; upd.turnStart = Date.now();
     }
     await update(ref(db, `rooms/${roomId}`), upd);
-  } catch(e) {
-    console.error('Cell click error:', e);
-  } finally { processing = false; }
+  } catch(e) { console.error('Cell click error:', e); }
+  finally { processing = false; }
+}
+
+// ── NUDGE OPPONENT ────────────────────────────────────────
+window.nudgeOpponent = async function() {
+  if (!roomId || !myRole || nudgeCooldown) return;
+  nudgeCooldown = true;
+  const nudgeBtn = document.getElementById('nudgeBtn');
+  if (nudgeBtn) { nudgeBtn.disabled = true; nudgeBtn.textContent = '⏳ Nudged!'; }
+  try {
+    const oppRole = myRole === 'X' ? 'O' : 'X';
+    await update(ref(db, `rooms/${roomId}`), { nudge: { target: oppRole, ts: Date.now() } });
+  } catch(e) {}
+  setTimeout(() => {
+    nudgeCooldown = false;
+    const btn = document.getElementById('nudgeBtn');
+    if (btn) { btn.disabled = false; btn.textContent = '📳 Nudge'; }
+  }, 15000); // 15s cooldown
+};
+
+function doVibrate() {
+  try {
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 300]);
+  } catch(e) {}
 }
 
 // ── REQUEST NEW GAME ───────────────────────────────────────
@@ -1273,6 +1361,8 @@ window.leaveGame = async function() {
     } catch(e){}
   }
   roomId=null; myRole=null; isOnlineGame=false;
+  replyTo=null; nudgeCooldown=false; lastNudgeReceived=0;
+  cancelReply();
   overlay.classList.remove('show');
   document.getElementById('chatMessages').innerHTML='';
   showScreen('screen-home');
@@ -1290,8 +1380,28 @@ window.sendChat = async function() {
   clearTimeout(typingTimeout);
   if (roomId && myRole) update(ref(db, `rooms/${roomId}/typing`), { [myRole]: false }).catch(()=>{});
   inp.value = '';
-  await push(ref(db, `rooms/${roomId}/chat`), { sender:myRole, name:myName, text:txt, ts:Date.now() });
+  const msgData = { sender:myRole, name:myName, text:txt, ts:Date.now() };
+  if (replyTo) { msgData.replyText = replyTo.text; msgData.replySender = replyTo.sender; }
+  cancelReply();
+  await push(ref(db, `rooms/${roomId}/chat`), msgData);
 };
+
+window.cancelReply = function() {
+  replyTo = null;
+  const prev = document.getElementById('replyPreview');
+  if (prev) prev.classList.remove('show');
+};
+
+function setReply(text, sender) {
+  replyTo = { text, sender };
+  const prev = document.getElementById('replyPreview');
+  const ptxt = document.getElementById('replyPreviewText');
+  if (prev && ptxt) {
+    ptxt.textContent = text;
+    prev.classList.add('show');
+  }
+  document.getElementById('chatInput').focus();
+}
 
 window.sendReaction = async function(emoji) {
   if (!roomId || !myRole) return;
@@ -1303,20 +1413,59 @@ function renderChat(chatData) {
   const container = document.getElementById('chatMessages');
   const msgs = Object.values(chatData).sort((a,b) => a.ts - b.ts);
   if (msgs.length === lastChatCount) return;
-  const isScrolledToBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 40;
   const newMsgs = msgs.slice(lastChatCount);
   newMsgs.forEach(m => {
     const isMe = m.sender === myRole;
     const div = document.createElement('div');
     div.className = 'chat-msg ' + (isMe?'mine':'theirs');
+
+    // Sender name (for opponent msgs)
     if (!isMe) {
       const s = document.createElement('div');
       s.className='chat-sender'; s.textContent = m.name || (m.sender==='X'?'Player 1':'Player 2');
       div.appendChild(s);
     }
+
+    // Reply quote bar
+    if (m.replyText) {
+      const rb = document.createElement('div');
+      rb.className = 'chat-reply-bar';
+      rb.textContent = '↩ ' + m.replyText;
+      div.appendChild(rb);
+    }
+
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble'; bubble.textContent = m.text;
-    div.appendChild(bubble); container.appendChild(div);
+    div.appendChild(bubble);
+
+    // Swipe-to-reply (touch)
+    let touchStartX = 0, touchStartY = 0, swiping = false;
+    div.addEventListener('touchstart', e => {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      swiping = false;
+    }, {passive:true});
+    div.addEventListener('touchmove', e => {
+      const dx = e.touches[0].clientX - touchStartX;
+      const dy = Math.abs(e.touches[0].clientY - touchStartY);
+      if (dy > 12) return; // vertical scroll, ignore
+      if (dx > 8 && !swiping) { swiping = true; }
+      if (swiping && dx > 0 && dx < 80) {
+        div.style.transform = `translateX(${dx * 0.5}px)`;
+      }
+    }, {passive:true});
+    div.addEventListener('touchend', e => {
+      const dx = e.changedTouches[0].clientX - touchStartX;
+      div.style.transform = '';
+      if (swiping && dx > 40) {
+        setReply(m.text, m.sender);
+        // small vibrate feedback
+        try { if(navigator.vibrate) navigator.vibrate(30); } catch(e){}
+      }
+      swiping = false;
+    }, {passive:true});
+
+    container.appendChild(div);
     while (container.children.length > 100) container.removeChild(container.firstChild);
   });
   if (newMsgs.length > 0 && lastChatCount > 0) {
@@ -1324,7 +1473,6 @@ function renderChat(chatData) {
     if (latest.sender !== myRole) playSound('chat');
   }
   lastChatCount = msgs.length;
-  // Always scroll to bottom when new messages arrive
   container.scrollTop = container.scrollHeight;
 }
 
@@ -1641,9 +1789,9 @@ function showLCOverlay(type) {
 // expose for HTML onclick
 window.sendChat = window.sendChat;
 window.sendReaction = window.sendReaction;
+window.cancelReply = window.cancelReply;
 
 </script>
 </body>
   </html>
-
-                                         
+  
