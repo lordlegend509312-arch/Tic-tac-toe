@@ -989,13 +989,12 @@ function listenToRoom(code) {
 }
 
 // ── HANDLE ROOM UPDATE ─────────────────────────────────────
-// BUG FIX: Properly separate "lobby waiting" vs "game screen" transitions
 function handleRoomUpdate(data) {
   const { players } = data;
   const lobbyVisible = !document.getElementById('screen-lobby').classList.contains('hidden');
   const gameVisible  = !document.getElementById('screen-game').classList.contains('hidden');
 
-  // If we're X waiting in lobby and O just joined → go to game screen
+  // X waiting in lobby and O just joined → switch to game screen
   if (lobbyVisible && myRole === 'X' && players.O) {
     lastChatCount = 0; lastBoardState = null; overlayShown = false; lastStatus = null;
     document.getElementById('chatMessages').innerHTML = '';
@@ -1004,15 +1003,15 @@ function handleRoomUpdate(data) {
     return;
   }
 
-  // If game screen is already visible, just render
+  // Game screen already visible → just render
   if (gameVisible) {
     renderGame(data);
     return;
   }
 
-  // If neither lobby nor game is shown yet (O just joined and goToGame is being called) — render
+  // O player: game screen not yet shown → show it first then render
   if (!lobbyVisible && !gameVisible) {
-    renderGame(data);
+    showScreen('screen-game', () => renderGame(data));
   }
 }
 
@@ -1304,7 +1303,8 @@ function renderChat(chatData) {
     if (latest.sender !== myRole) playSound('chat');
   }
   lastChatCount = msgs.length;
-  if (isScrolledToBottom) container.scrollTop = container.scrollHeight;
+  // Always scroll to bottom when new messages arrive
+  container.scrollTop = container.scrollHeight;
 }
 
 // ── OVERLAY ────────────────────────────────────────────────
@@ -1623,5 +1623,5 @@ window.sendReaction = window.sendReaction;
 
 </script>
 </body>
-                                               </html>
+  </html>
   
