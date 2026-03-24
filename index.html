@@ -917,7 +917,9 @@ window.joinRoom = async function() {
     msg.textContent = '❌ This room is closed.';
     if (joinBtn) joinBtn.disabled = false; return;
   }
-  if (data.players?.O) {
+  // Fix: explicitly check for non-null, non-empty O player (handles null, undefined, empty string)
+  const oPlayer = data.players?.O;
+  if (oPlayer !== null && oPlayer !== undefined && oPlayer !== '') {
     msg.textContent = '❌ Room is full.';
     if (joinBtn) joinBtn.disabled = false; return;
   }
@@ -925,14 +927,23 @@ window.joinRoom = async function() {
     msg.textContent = '❌ You cannot join your own room!';
     if (joinBtn) joinBtn.disabled = false; return;
   }
+  // Extra check: status must be 'waiting'
+  if (data.status !== 'waiting') {
+    msg.textContent = '❌ Game already in progress.';
+    if (joinBtn) joinBtn.disabled = false; return;
+  }
 
   roomId = code; myRole = 'O'; isOnlineGame = true;
 
   try {
-    await update(ref(db, `rooms/${code}/players`),  { O: myName });
-    await update(ref(db, `rooms/${code}/sessions`), { O: mySessionId });
-    await update(ref(db, `rooms/${code}/presence`), { O: true });
-    await update(ref(db, `rooms/${code}`), { status: 'playing', turnStart: Date.now() });
+    // Atomic update - set everything at once to avoid race conditions
+    await update(ref(db, `rooms/${code}`), {
+      'players/O':  myName,
+      'sessions/O': mySessionId,
+      'presence/O': true,
+      status:       'playing',
+      turnStart:    Date.now()
+    });
     onDisconnect(ref(db, `rooms/${code}/presence/O`)).set(false);
   } catch(e) {
     msg.textContent = '❌ Join failed. Try again.';
@@ -1612,5 +1623,5 @@ window.sendReaction = window.sendReaction;
 
 </script>
 </body>
-      </html>
+                                               </html>
   
